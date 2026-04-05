@@ -2,8 +2,8 @@
 
 > Прототип алгоритма сжатия аудиофайлов без потери качества на основе линейного предсказания и кодирования Райса.
 
-**Автор:** Скориков М.А., группа РК6-42Б, МГТУ им. Н.Э. Баумана  
-**Руководитель:** Данилина Е.А.  
+**Автор:** Скориков М.А., группа РК6-42Б, МГТУ им. Н.Э. Баумана
+**Руководитель:** Данилина Е.А.
 **Год:** 2025
 
 ---
@@ -11,10 +11,11 @@
 ## Содержание
 
 - [Обзор](#обзор)
+- [Архитектура проекта](#архитектура-проекта)
 - [Математические основы](#математические-основы)
 - [Формат MYFL](#формат-myfl)
-- [API](#api)
-- [Быстрый старт](#быстрый-старт)
+- [API модулей](#api-модулей)
+- [Сборка и запуск](#сборка-и-запуск)
 - [Результаты тестирования](#результаты-тестирования)
 - [Зависимости](#зависимости)
 - [Источники](#источники)
@@ -31,6 +32,53 @@ MYFL — пользовательский lossless-формат хранения
 4. Кодирование остатков методом Райса с ZigZag-преобразованием
 5. Сохранение в бинарный контейнер `.MYFL`
 6. Декодирование и восстановление сигнала без потерь
+
+---
+
+## Архитектура проекта
+
+Проект разделён на независимые модули:
+
+```
+myfl_types.hpp      — общие типы и структуры (MYFLHeader, BlockHeader, AudioData)
+lpc.hpp / lpc.cpp   — линейное предсказание (LPC, автокорреляция, Левинсон-Дурбин)
+rice.hpp / rice.cpp — кодирование Райса + ZigZag-преобразование
+wav_io.hpp / wav_io.cpp  — чтение/запись WAV через libsndfile
+myfl_codec.hpp / myfl_codec.cpp — кодирование и декодирование MYFL
+spectrogram.hpp / spectrogram.cpp — FFT-анализ и визуализация спектрограмм
+main.cpp            — точка входа (кодирование → декодирование → сравнение)
+```
+
+```
+┌──────────┐   ┌──────────────┐   ┌──────────────┐
+│ wav_io   │──▶│ myfl_codec   │──▶│ myfl_codec   │
+│ loadAudio│   │  saveAsMYFL  │   │  decodeMYFL  │
+└──────────┘   └──────┬───────┘   └──────┬───────┘
+                      │                  │
+              ┌───────┴───────┐  ┌───────┴───────┐
+              │     lpc       │  │     rice      │
+              │ calculateLPC  │  │   riceDecode  │
+              │ linearPredict │  │   riceEncode  │
+              └───────────────┘  └───────────────┘
+                      │                  │
+              ┌───────┴───────┐          │
+              │    rice       │          │
+              │ estimateSize  │          │
+              │ riceEncode    │          │
+              └───────────────┘          │
+                                         │
+┌────────────────────────────────────────┘
+│
+│  ┌──────────┐          ┌───────────────┐
+│  │ wav_io   │          │ spectrogram   │
+│  │ saveAsWav│◀────────▶│ computeSpectrum│
+│  └──────────┘          │ drawSpectrogram│
+│                        └───────────────┘
+│                              │
+│                        ┌─────┴─────┐
+│                        │   FFTW    │
+│                        └───────────┘
+```
 
 ---
 
@@ -102,93 +150,122 @@ struct BlockHeader {
 | Поле | Тип | Описание |
 |------|-----|----------|
 | LPC-коэффициенты | `float[PREDICTOR_ORDER]` | 2 коэффициента предсказания |
-| Остатки | Rice- encoded | Закодированные остатки (ZigZag + Rice) |
+| Остатки | Rice-encoded | Закодированные остатки (ZigZag + Rice) |
 
 ---
 
-## API
+## API модулей
 
-### `loadAudio(filename) → AudioData`
+### myfl_types.hpp
 
-Загружает WAV-файл через `libsndfile`.
+| Тип | Описание |
+|-----|----------|
+| `AudioData` | Сэмплы (`vector<float>`) + `SF_INFO` |
+| `MYFLHeader` | Заголовок MYFL-файла (24 байта) |
+| `BlockHeader` | Заголовок блока данных (8 байт) |
+| `PREDICTOR_ORDER` | Порядок предсказания = 2 |
 
-### `calculateLPCoefficients(samples, order) → vector<float>`
+### lpc.hpp
 
-Вычисляет коэффициенты линейного предсказания заданного порядка.
+| Функция | Описание |
+|---------|----------|
+| `calculateLPCoefficients(samples, order)` | Вычисляет LPC-коэффициенты (автокорреляция + Ханн + Левинсон-Дурбин) |
+| `linearPredict(samples, coeffs, order)` | Возвращает остатки предсказания |
 
-### `linearPredict(samples, coeffs, order) → vector<int>`
+### rice.hpp
 
-Возвращает остатки (разница между реальными и предсказанными значениями).
+| Функция | Описание |
+|---------|----------|
+| `zigZagEncode(val)` | Знаковое → беззнаковое |
+| `zigZagDecode(z)` | Беззнаковое → знаковое |
+| `riceEncode(residuals, param)` | Rice-кодирование в битовый поток |
+| `riceDecode(encoded, param)` | Декодирование битового потока |
+| `estimateRiceSize(residuals, param)` | Оценка размера без реального кодирования |
 
-### `riceEncode(residuals, param) → vector<uint8_t>`
+### wav_io.hpp
 
-Кодирует остатки методом Райса с ZigZag-преобразованием.
+| Функция | Описание |
+|---------|----------|
+| `loadAudio(filename)` | Загрузка WAV через libsndfile |
+| `saveAsWav(samples, filename, ...)` | Сохранение в WAV (PCM 16/24/32, float) |
 
-### `riceDecode(encoded, param) → vector<int>`
+### myfl_codec.hpp
 
-Декодирует Rice-поток обратно в остатки.
+| Функция | Описание |
+|---------|----------|
+| `saveAsMYFL(samples, filename, sampleRate, channels)` | Кодирование в MYFL с подбором оптимального параметра Райса |
+| `decodeMYFL(filename)` | Декодирование MYFL → `vector<float>` |
 
-### `saveAsMYFL(samples, filename, sampleRate, channels)`
+### spectrogram.hpp
 
-Кодирует аудио и сохраняет в формат MYFL.
-
-### `decodeMYFL(filename) → vector<float>`
-
-Декодирует MYFL-файл и восстанавливает сигнал.
-
-### `saveAsWav(samples, filename, sampleRate, channels, format)`
-
-Сохраняет восстановленные сэмплы в WAV.
-
-### `computeSpectrum(audio, pos, channel, totalChannels) → vector<float>`
-
-Рассчитывает спектр через FFTW.
-
-### `drawSpectrogram(window, audio, sampleRate, channels, title)`
-
-Визуализирует спектрограмму через SFML.
+| Функция | Описание |
+|---------|----------|
+| `initFFTW()` | Инициализация FFTW (вызывать один раз) |
+| `cleanupFFTW()` | Освобождение ресурсов FFTW |
+| `computeSpectrum(audio, pos, channel, totalChannels)` | Расчёт амплитудного спектра (FFT, окно Ханна) |
+| `drawSpectrogram(window, audio, sampleRate, channels, title)` | Отрисовка спектрограммы в SFML |
 
 ---
 
-## Быстрый старт
+## Сборка и запуск
 
 ### Зависимости
 
-| Библиотека | Назначение |
-|------------|------------|
-| **libsndfile** | Чтение/запись WAV |
-| **FFTW** | Быстрое преобразование Фурье |
-| **SFML** | Графическая визуализация спектрограмм |
+| Библиотека | Назначение | URL |
+|------------|------------|-----|
+| **libsndfile** | Чтение/запись WAV | http://www.mega-nerd.com/libsndfile/ |
+| **FFTW** | Быстрое преобразование Фурье | http://www.fftw.org/ |
+| **SFML** | Графическая визуализация | https://www.sfml-dev.org/ |
 
-### Сборка
+### Команда сборки
 
 ```bash
-g++ main.cpp -o myfl \
+g++ main.cpp lpc.cpp rice.cpp myfl_codec.cpp wav_io.cpp spectrogram.cpp \
+  -o myfl \
   -lsndfile -lfftw3 -lsfml-graphics -lsfml-window -lsfml-system -lm
 ```
 
 ### Использование
 
 ```cpp
-// 1. Загрузка WAV
-AudioData originalAudio = loadAudio("input.wav");
+#include "myfl_types.hpp"
+#include "myfl_codec.hpp"
+#include "wav_io.hpp"
+#include "spectrogram.hpp"
 
-// 2. Кодирование в MYFL
-saveAsMYFL(originalAudio.samples, "output.MYFL",
-           originalAudio.info.samplerate,
-           originalAudio.info.channels);
+int main() {
+    initFFTW();
 
-// 3. Декодирование
-auto decoded = decodeMYFL("output.MYFL");
+    // 1. Загрузка WAV
+    AudioData originalAudio = loadAudio("input.wav");
 
-// 4. Сохранение обратно в WAV
-saveAsWav(decoded, "decoded.wav",
-          originalAudio.info.samplerate,
-          originalAudio.info.channels);
+    // 2. Кодирование в MYFL
+    saveAsMYFL(originalAudio.samples, "output.MYFL",
+               originalAudio.info.samplerate,
+               originalAudio.info.channels);
 
-// 5. Визуализация спектрограмм
-drawSpectrogram(windowOriginal, originalAudio.samples, ...);
-drawSpectrogram(windowDecoded, decodedAudio.samples, ...);
+    // 3. Декодирование
+    auto decoded = decodeMYFL("output.MYFL");
+
+    // 4. Сохранение обратно в WAV
+    saveAsWav(decoded, "decoded.wav",
+              originalAudio.info.samplerate,
+              originalAudio.info.channels,
+              originalAudio.info.format & SF_FORMAT_SUBMASK);
+
+    // 5. Визуализация спектрограмм
+    sf::RenderWindow win1(sf::VideoMode({800, 400}), "Original");
+    sf::RenderWindow win2(sf::VideoMode({800, 400}), "Decoded");
+
+    while (win1.isOpen() && win2.isOpen()) {
+        // ... обработка событий ...
+        drawSpectrogram(win1, originalAudio.samples, ...);
+        drawSpectrogram(win2, decoded, ...);
+    }
+
+    cleanupFFTW();
+    return 0;
+}
 ```
 
 ---
@@ -205,42 +282,66 @@ drawSpectrogram(windowDecoded, decodedAudio.samples, ...);
 | Сжатие | ~11 % |
 | Размер FLAC (сравнение) | 26.5 МБ (~52 % сжатие) |
 
+![Рис. 1 — Пример вывода в консоль при кодировании](images/image2.png)
+
+![Рис. 2 — Результат сжатия](images/image3.png)
+
+![Рис. 3 — Спектрограммы оригинального и декодированного файла](images/image4.png)
+
+![Рис. 4 — Демонстрация полученных файлов](images/image5.png)
+
 ### Синусоида 55 Гц
 
 | Параметр | Значение |
 |----------|----------|
+| Формат | WAV, PCM 32-bit float, 44.1 кГц, стерео |
+| Длительность | 32 сек |
 | Размер WAV | 11.3 МБ |
 | Размер MYFL | 5.6 МБ |
 | Сжатие | ~50 % |
+
+![Рис. 5 — Спектрограммы синусоидального файла](images/image6.png)
 
 ### Transient (резкие переходы)
 
 | Параметр | Значение |
 |----------|----------|
+| Формат | WAV, PCM 16-bit, 44.1 кГц, стерео |
+| Длительность | 5 сек |
 | Размер WAV | 947 КБ |
 | Размер MYFL | 377 КБ |
 | Сжатие | ~60 % |
+
+![Рис. 6 — Спектрограммы транзиент аудио-файла](images/image7.png)
 
 ### Ambient-аудио
 
 | Параметр | Значение |
 |----------|----------|
+| Формат | WAV, PCM 16-bit, 48 кГц, стерео |
+| Длительность | 96 сек |
 | Размер WAV | 18.4 МБ |
 | Размер MYFL | 17.2 МБ |
 | Сжатие | ~2–5 % |
+
+![Рис. 7 — Спектрограммы эмбиент аудио-файла](images/image8.png)
 
 ### Поп-трек
 
 | Параметр | Значение |
 |----------|----------|
+| Формат | WAV, PCM 16-bit, 44.1 кГц, стерео |
+| Длительность | 214 сек |
 | Размер WAV | 37.7 МБ |
 | Размер MYFL | 37.0 МБ |
 | Сжатие | ~2–5 % |
 
+![Рис. 8 — Спектрограммы поп-трека](images/image9.png)
+
 ### Выводы
 
 - **Lossless** — спектрограммы и осциллограммы декодированных файлов идентичны оригиналам
-- **Максимальное сжатие** достигается на предсказуемых сигналах (синусоида — ~50 %)
+- **Максимальное сжатие** достигается на предсказуемых сигналах (синусоида — ~50 %, транзиенты — ~60 %)
 - **Сложные спектральные структуры** (поп-музыка, ambient) сжимаются незначительно
 - Артефакты отсутствуют даже на резких переходах
 
@@ -265,5 +366,3 @@ SFML        — https://www.sfml-dev.org/
 5. [FLAC Format Specification](https://xiph.org/flac/format.html)
 6. [Linear predictive coding — Wikipedia](https://en.wikipedia.org/wiki/Linear_predictive_coding)
 7. [Rice coding — Wikipedia](https://en.wikipedia.org/wiki/Rice_coding)
-
----
